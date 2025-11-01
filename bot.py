@@ -18,8 +18,9 @@ import asyncio
 # CONFIGURATION
 # ============================================================================
 
-BOT_TOKEN="8514417883:AAEBpufXJ0NdXM0xzhzVT7NRLFJ9X_n4Boc"
-ADMIN_IDS=8275649347
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()]
 LOG_FILE = "auto_approve_log.txt"
 STATS_FILE = "bot_stats.json"
 HEALTH_CHECK_PORT = int(os.environ.get("PORT", 8080))
@@ -535,7 +536,7 @@ def main():
             "Set it using: export BOT_TOKEN='your_bot_token_here'"
         )
     
-    if not ADMIN_IDS or len(ADMIN_IDS) == 0:
+    if len(ADMIN_IDS) == 0:
         logger.warning("⚠️  No admin IDs configured. Admin features will not be accessible.")
         logger.warning("Set ADMIN_IDS environment variable: export ADMIN_IDS='123456789,987654321'")
     else:
