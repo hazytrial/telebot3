@@ -1,34 +1,23 @@
 import os
 import logging
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     ChatJoinRequestHandler,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
-    filters,
     ContextTypes
 )
 from flask import Flask, jsonify
 import threading
-
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
+import asyncio
 BOT_TOKEN = "8514417883:AAEBpufXJ0NdXM0xzhzVT7NRLFJ9X_n4Boc"
-ADMIN_IDS = [8275649347]
+ADMIN_IDS = 8275649347
 LOG_FILE = "auto_approve_log.txt"
 STATS_FILE = "bot_stats.json"
 HEALTH_CHECK_PORT = int(os.environ.get("PORT", 8080))
-
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
-
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -38,11 +27,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
-# ============================================================================
-# STATISTICS & DATA MANAGEMENT
-# ============================================================================
-
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
 class BotStats:
     def __init__(self):
         self.start_time = datetime.now()
@@ -55,7 +40,6 @@ class BotStats:
         self.load_stats()
     
     def load_stats(self):
-        """Load statistics from file"""
         try:
             if os.path.exists(STATS_FILE):
                 with open(STATS_FILE, 'r') as f:
@@ -70,7 +54,6 @@ class BotStats:
             logger.error(f"Failed to load stats: {e}")
     
     def save_stats(self):
-        """Save statistics to file"""
         try:
             data = {
                 'total_requests': self.total_requests,
@@ -86,7 +69,6 @@ class BotStats:
             logger.error(f"Failed to save stats: {e}")
     
     def add_request(self, chat_id, chat_title, user_id, user_name, approved=True):
-        """Record a join request"""
         self.total_requests += 1
         if approved:
             self.approved += 1
@@ -171,7 +153,9 @@ def admin_only(func):
             return
         return await func(update, context)
     return wrapper
+
 app = Flask(__name__)
+app.logger.setLevel(logging.WARNING)
 
 @app.route('/')
 def home():
@@ -213,9 +197,9 @@ def get_stats():
     })
 
 def run_flask():
-    """Run Flask server"""
+    """Run Flask server in a separate thread"""
+    logger.info("🌐 Starting health check server on port %s", HEALTH_CHECK_PORT)
     app.run(host='0.0.0.0', port=HEALTH_CHECK_PORT, debug=False, use_reloader=False)
-
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming join requests"""
     req = update.chat_join_request
@@ -280,7 +264,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Advanced statistics tracking\n\n"
         "*Commands:*\n"
         "/stats - View statistics\n"
-        "/status - Bot status" + admin_text,
+        "/status - Bot status" 
+        "Admin • @CastedSpel"+ admin_text,
         parse_mode="Markdown"
     )
 
@@ -356,7 +341,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = query.data
     
     if action == "admin_stats":
-        # Detailed statistics
         success_rate = stats.get_success_rate()
         avg_per_day = stats.total_requests / max(len(stats.daily_stats), 1)
         
@@ -373,7 +357,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif action == "admin_chats":
-        # Chat statistics
         text = "💬 *Chat Statistics*\n\n"
         for chat_id, data in list(stats.chat_stats.items())[:10]:
             rate = (data['approved'] / max(data['total'], 1) * 100)
@@ -384,7 +367,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"_...and {len(stats.chat_stats) - 10} more chats_"
     
     elif action == "admin_recent":
-        # Recent users
         text = "👥 *Recent Approvals* (Last 10)\n\n"
         for user in stats.recent_users[:10]:
             status = "✅" if user['approved'] else "❌"
@@ -393,7 +375,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"   💬 {user['chat_title']}\n\n"
     
     elif action == "admin_daily":
-        # Daily statistics
         text = "📅 *Daily Statistics* (Last 7 Days)\n\n"
         sorted_days = sorted(stats.daily_stats.items(), reverse=True)[:7]
         for date, data in sorted_days:
@@ -402,14 +383,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"   Requests: {data['requests']} | Approved: {data['approved']} | Rate: {rate:.1f}%\n\n"
     
     elif action == "admin_notify":
-        # Toggle notifications
         current = context.bot_data.get('notify_admins', False)
         context.bot_data['notify_admins'] = not current
         new_status = "Enabled" if not current else "Disabled"
         text = f"🔔 *Notifications*\n\nAdmin notifications: *{new_status}*"
     
     elif action == "admin_logs":
-        # Show recent logs
         try:
             with open(LOG_FILE, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
@@ -419,7 +398,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "❌ Unable to read logs"
     
     elif action == "admin_reset":
-        # Reset statistics with confirmation
         keyboard = [
             [
                 InlineKeyboardButton("✅ Yes, Reset", callback_data="admin_reset_confirm"),
@@ -440,7 +418,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "✅ *Statistics Reset*\n\nAll statistics have been cleared."
     
     elif action == "admin_refresh":
-        # Refresh admin panel
         keyboard = [
             [
                 InlineKeyboardButton("📊 Detailed Stats", callback_data="admin_stats"),
@@ -517,7 +494,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN APPLICATION
 # ============================================================================
 
-async def main():
+def main():
     """Main bot application"""
     if not BOT_TOKEN:
         raise SystemExit(
@@ -531,8 +508,7 @@ async def main():
     else:
         logger.info(f"👨‍💼 Configured {len(ADMIN_IDS)} admin(s)")
     
-    # Start Flask health check server
-    logger.info("🌐 Starting health check server on port %s", HEALTH_CHECK_PORT)
+    # Start Flask health check server in background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
@@ -559,15 +535,15 @@ async def main():
     logger.info("⚡ Fast response mode: ENABLED")
     logger.info("🔐 Admin panel: /admin")
     
-    await application.run_polling(
+    # Run bot with polling
+    application.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES
     )
 
 if __name__ == "__main__":
-    import asyncio
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
     except Exception as e:
