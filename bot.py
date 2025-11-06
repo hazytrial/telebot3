@@ -1,11 +1,11 @@
-import os
 import logging
 import requests
+import os
+import threading
 from flask import Flask, jsonify
-from threading import Thread
-from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, InlineQueryHandler, ContextTypes, CallbackQueryHandler
-from uuid import uuid4
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -14,360 +14,414 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# API Configuration
-INDIA_POSTAL_API = "https://api.postalpincode.in/pincode"
+# Configuration
+BOT_TOKEN = "7966712011:AAFVVWlxWaXSOaxuEtxkIY73LKXkvZyVSoQ"
+PORT = int(os.environ.get('PORT', 8443))
+WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL') or os.environ.get('RAILWAY_STATIC_URL')
 
-# Get token from environment variable (for Render deployment)
-TELEGRAM_BOT_TOKEN = "7966712011:AAFVVWlxWaXSOaxuEtxkIY73LKXkvZyVSoQ"
-
-# Flask app for health monitoring
+# Initialize Flask app for health checks
 app = Flask(__name__)
+
+# Health check metrics
+bot_start_time = datetime.now()
+total_requests = 0
+successful_lookups = 0
 
 @app.route('/')
 def home():
-    """Home endpoint"""
     return jsonify({
-        "status": "online",
-        "bot": "Indian Postal Info Bot - Inline Mode",
-        "version": "2.0.0"
+        "status": "Bot is running",
+        "service": "Telegram Postal Pincode Bot",
+        "timestamp": datetime.now().isoformat()
     })
 
 @app.route('/health')
-def health():
-    """Health check endpoint for UptimeRobot/BetterStack"""
-    return jsonify({
-        "status": "healthy",
-        "service": "telegram_bot_inline"
-    }), 200
-
-@app.route('/ping')
-def ping():
-    """Simple ping endpoint"""
-    return "pong", 200
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message"""
-    # Create inline button
-    keyboard = [
-        [InlineKeyboardButton("🔍 Look up pincode", switch_inline_query_current_chat="")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+def health_check():
+    """Health check endpoint for monitoring"""
+    global total_requests, successful_lookups
     
-    welcome_message = """
-🐥 Indian Postal Info Bot - Inline Mode!
-
-🚀 How to Use:
-Just type @yourbotusername followed by a PIN code in ANY chat!
-
-📝 Examples:
-@yourbotusername 110001
-@yourbotusername 400001
-@yourbotusername 560001
-
-✨ Features:
-• Works in any chat (private, groups, channels)
-• Instant results as you type
-• No need to open bot chat
-• Share postal info easily
-• 24/7 availability
-
-💡 Click the button below to start searching!
-"""
-    await update.message.reply_text(welcome_message, reply_markup=reply_markup)
-    logger.info(f"User {update.effective_user.id} started the bot")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send help message"""
-    # Create inline button
-    keyboard = [
-        [InlineKeyboardButton("🔍 Look up pincode", switch_inline_query_current_chat="")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    help_text = """
-📖 How to Use Inline Mode:
-
-1️⃣ Click "Look up pincode" button below
-2️⃣ Type a 6-digit PIN code
-3️⃣ Select result from dropdown
-4️⃣ Share instantly!
-
-📝 Or type manually:
-@yourbotusername 110001
-
-📋 Information Provided:
-• Post Office Names
-• Branch Types
-• Delivery Status
-• District & State
-• Division & Region
-• Circle Information
-
-✨ Benefits:
-• Use in any chat or group
-• No need to switch to bot chat
-• Instant search results
-• Share info with friends easily
-• Always up-to-date data
-
-💡 Tips:
-• PIN code must be 6 digits
-• Results appear as you type
-• Works in private & group chats
-• Data from Indian Postal Service
-
-Enjoy! 🐥
-"""
-    await update.message.reply_text(help_text, reply_markup=reply_markup)
-    logger.info(f"User {update.effective_user.id} requested help")
-
-
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline queries"""
-    query = update.inline_query.query.strip()
-    
-    # If query is empty, show instructions
-    if not query:
-        results = [
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="🐥 Indian Postal Info Bot",
-                description="Type a 6-digit PIN code to search",
-                input_message_content=InputTextMessageContent(
-                    message_text="🇮🇳 Indian Postal Info Bot\n\n"
-                    "Type @yourbotusername <pincode> to search!\n"
-                    "Example: @yourbotusername 110001"
-                )
-            ),
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="📝 Example: 110001",
-                description="Search New Delhi postal info",
-                input_message_content=InputTextMessageContent(
-                    message_text="Try typing: @yourbotusername 110001"
-                )
-            ),
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="📝 Example: 400001",
-                description="Search Mumbai postal info",
-                input_message_content=InputTextMessageContent(
-                    message_text="Try typing: @yourbotusername 400001"
-                )
-            )
-        ]
-        await update.inline_query.answer(results, cache_time=30)
-        return
-
-    # Validate PIN code format
-    pincode = query.replace(" ", "")
-    
-    if not pincode.isdigit():
-        results = [
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="❌ Invalid Input",
-                description="PIN code must contain only numbers",
-                input_message_content=InputTextMessageContent(
-                    message_text="❌ Invalid PIN code!\n\nPlease enter only numbers (6 digits)."
-                )
-            )
-        ]
-        await update.inline_query.answer(results, cache_time=10)
-        return
-    
-    if len(pincode) != 6:
-        results = [
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title=f"⏳ Keep typing... ({len(pincode)}/6)",
-                description="PIN code must be exactly 6 digits",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"⏳ Incomplete PIN code: {pincode}\n\nPlease enter all 6 digits."
-                )
-            )
-        ]
-        await update.inline_query.answer(results, cache_time=10)
-        return
-
-    logger.info(f"Inline query for PIN code: {pincode}")
-
+    # Check if bot is responsive
+    bot_status = "healthy"
     try:
-        # Fetch postal data
-        url = f"{INDIA_POSTAL_API}/{pincode}"
-        response = requests.get(url, timeout=10)
+        # Simple API test
+        test_response = requests.get("https://api.postalpincode.in/pincode/110001", timeout=5)
+        api_status = "up" if test_response.status_code == 200 else "down"
+    except:
+        api_status = "down"
+    
+    uptime = datetime.now() - bot_start_time
+    
+    health_data = {
+        "status": bot_status,
+        "timestamp": datetime.now().isoformat(),
+        "uptime_seconds": int(uptime.total_seconds()),
+        "uptime_human": str(uptime).split('.')[0],
+        "total_requests": total_requests,
+        "successful_lookups": successful_lookups,
+        "api_status": api_status,
+        "version": "1.0.0"
+    }
+    
+    status_code = 200 if bot_status == "healthy" and api_status == "up" else 503
+    return jsonify(health_data), status_code
 
+@app.route('/metrics')
+def metrics():
+    """Metrics endpoint for monitoring"""
+    global total_requests, successful_lookups
+    
+    uptime = datetime.now() - bot_start_time
+    
+    metrics_data = {
+        "bot_metrics": {
+            "uptime_seconds": int(uptime.total_seconds()),
+            "total_requests": total_requests,
+            "successful_lookups": successful_lookups,
+            "error_rate": round((1 - successful_lookups / total_requests) * 100, 2) if total_requests > 0 else 0
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    return jsonify(metrics_data)
+
+@app.route('/ready')
+def ready_check():
+    """Readyness check for deployment"""
+    return jsonify({"status": "ready", "bot": "operational"}), 200
+
+# Initialize Telegram application
+application = Application.builder().token(BOT_TOKEN).build()
+
+# API Functions
+async def get_pincode_info(pincode):
+    """Fetch pincode information from API"""
+    global total_requests, successful_lookups
+    total_requests += 1
+    
+    try:
+        response = requests.get(f"https://api.postalpincode.in/pincode/{pincode}", timeout=10)
         if response.status_code == 200:
             data = response.json()
-            
-            if data[0]["Status"] == "Success":
-                post_offices = data[0]["PostOffice"]
-                results = []
-                
-                # Create summary result
-                summary_text = f"📮 PIN Code: {pincode}\n"
-                summary_text += f"📍 Total Post Offices: {len(post_offices)}\n"
-                summary_text += f"{'='*35}\n\n"
-                
-                for i, po in enumerate(post_offices[:8], 1):
-                    summary_text += f"🏤 {i}. {po.get('Name', 'N/A')}\n"
-                    summary_text += f"   📌 Type: {po.get('BranchType', 'N/A')}\n"
-                    summary_text += f"   📦 Delivery: {po.get('DeliveryStatus', 'N/A')}\n"
-                    summary_text += f"   🏙️ District: {po.get('District', 'N/A')}\n"
-                    summary_text += f"   🗺️ State: {po.get('State', 'N/A')}\n"
-                    summary_text += f"   📮 Division: {po.get('Division', 'N/A')}\n"
-                    summary_text += f"   🌐 Region: {po.get('Region', 'N/A')}\n\n"
-                
-                if len(post_offices) > 8:
-                    summary_text += f"... and {len(post_offices) - 8} more\n\n"
-                
-                summary_text += "✅ Data from Indian Postal Service"
-                
-                # Add summary result with inline button
-                keyboard = [[InlineKeyboardButton("🔍 Look up another pincode", switch_inline_query_current_chat="")]]
-                
-                results.append(
-                    InlineQueryResultArticle(
-                        id=str(uuid4()),
-                        title=f"📮 {pincode} - {first_po.get('District', 'N/A')}",
-                        description=f"{len(post_offices)} post offices in {first_po.get('State', 'N/A')}",
-                        input_message_content=InputTextMessageContent(
-                            message_text=summary_text
-                        ),
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                )
-                
-                # Add individual post office results (up to 9 more)
-                keyboard = [[InlineKeyboardButton("🔍 Look up another pincode", switch_inline_query_current_chat="")]]
-                
-                for po in post_offices[:9]:
-                    detail_text = f"📮 PIN Code: {pincode}\n\n"
-                    detail_text += f"🏤 Post Office: {po.get('Name', 'N/A')}\n"
-                    detail_text += f"📌 Type: {po.get('BranchType', 'N/A')}\n"
-                    detail_text += f"📦 Delivery: {po.get('DeliveryStatus', 'N/A')}\n"
-                    detail_text += f"🏙️ District: {po.get('District', 'N/A')}\n"
-                    detail_text += f"🗺️ State: {po.get('State', 'N/A')}\n"
-                    detail_text += f"📮 Division: {po.get('Division', 'N/A')}\n"
-                    detail_text += f"🌐 Region: {po.get('Region', 'N/A')}\n"
-                    
-                    if po.get('Circle'):
-                        detail_text += f"⭕ Circle: {po.get('Circle')}\n"
-                    
-                    detail_text += f"\n✅ Indian Postal Service"
-                    
-                    results.append(
-                        InlineQueryResultArticle(
-                            id=str(uuid4()),
-                            title=f"🏤 {po.get('Name', 'N/A')}",
-                            description=f"{po.get('BranchType', 'N/A')} - {po.get('District', 'N/A')}",
-                            input_message_content=InputTextMessageContent(
-                                message_text=detail_text
-                            ),
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
-                    )
-                
-                await update.inline_query.answer(results, cache_time=300)
-                logger.info(f"Returned {len(results)} results for PIN: {pincode}")
-                
-            else:
-                # PIN code not found
-                results = [
-                    InlineQueryResultArticle(
-                        id=str(uuid4()),
-                        title=f"❌ PIN Code {pincode} Not Found",
-                        description="Please verify the PIN code is correct",
-                        input_message_content=InputTextMessageContent(
-                            message_text=f"❌ PIN Code Not Found!\n\n"
-                            f"PIN: {pincode}\n\n"
-                            "Please verify:\n"
-                            "• PIN code is correct\n"
-                            "• It's a valid Indian PIN code\n\n"
-                            "Try searching another PIN code."
-                        )
-                    )
-                ]
-                await update.inline_query.answer(results, cache_time=60)
-                logger.warning(f"PIN code not found: {pincode}")
-        else:
-            # API error
-            results = [
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title="❌ Service Unavailable",
-                    description="Please try again in a moment",
-                    input_message_content=InputTextMessageContent(
-                        message_text="❌ Service temporarily unavailable.\n\nPlease try again in a moment."
-                    )
-                )
-            ]
-            await update.inline_query.answer(results, cache_time=10)
-            logger.error(f"API error: {response.status_code}")
-
-    except requests.exceptions.Timeout:
-        results = [
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="❌ Request Timeout",
-                description="Server took too long to respond",
-                input_message_content=InputTextMessageContent(
-                    message_text="❌ Request timeout!\n\nPlease try again."
-                )
-            )
-        ]
-        await update.inline_query.answer(results, cache_time=10)
-        logger.error(f"Timeout for PIN: {pincode}")
-        
+            if data and data[0]['Status'] == 'Success':
+                successful_lookups += 1
+                return data[0]['PostOffice']
+        return None
     except Exception as e:
-        results = [
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="❌ Error Occurred",
-                description="Something went wrong",
-                input_message_content=InputTextMessageContent(
-                    message_text="❌ An error occurred!\n\nPlease try again later."
-                )
-            )
-        ]
-        await update.inline_query.answer(results, cache_time=10)
-        logger.error(f"Error: {str(e)}")
+        logger.error(f"API Error: {e}")
+        return None
 
-
-def run_bot():
-    """Run the Telegram bot"""
+async def search_by_branch(branch_name):
+    """Search pincodes by branch name"""
+    global total_requests, successful_lookups
+    total_requests += 1
+    
     try:
-        # Create application
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-        # Register handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(InlineQueryHandler(inline_query))
-
-        # Start the bot
-        logger.info("🐥 Indian Postal Info Bot (Inline Mode) is starting...")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-        
+        response = requests.get(f"https://api.postalpincode.in/postoffice/{branch_name}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data and data[0]['Status'] == 'Success':
+                successful_lookups += 1
+                return data[0]['PostOffice']
+        return None
     except Exception as e:
-        logger.error(f"Bot crashed: {str(e)}")
-        raise
+        logger.error(f"API Error: {e}")
+        return None
 
+# Bot Handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Main menu with inline buttons"""
+    keyboard = [
+        [InlineKeyboardButton("🔍 Lookup by Pincode", callback_data="lookup_pincode")],
+        [InlineKeyboardButton("🏢 Search by Branch", callback_data="search_branch")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
+        [InlineKeyboardButton("📊 Bot Status", callback_data="bot_status")]
+    ]
+    
+    welcome_text = """
+🌐 *Postal Pincode Lookup Bot*
 
-def run_flask():
-    """Run Flask server for health monitoring"""
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+*Quick Actions:*
+• 🔍 Lookup by 6-digit Pincode
+• 🏢 Search by Branch/Post Office name
+• 📍 Get complete address details
+• ⚡ Fast API-based results
+• 📊 24/7 Monitoring
 
+*Choose an option below:* 👇
+    """
+    
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
 
-if __name__ == "__main__":
-    # Start Flask in a separate thread
-    flask_thread = Thread(target=run_flask, daemon=True)
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all inline button callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == "lookup_pincode":
+        await query.edit_message_text(
+            "🔢 *Enter 6-digit Pincode:*\n\nExample: `110001`",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Back", callback_data="main_menu")]
+            ])
+        )
+        context.user_data['awaiting'] = 'pincode'
+        
+    elif data == "search_branch":
+        await query.edit_message_text(
+            "🏢 *Enter Branch Name:*\n\nExample: `Connaught Place`",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Back", callback_data="main_menu")]
+            ])
+        )
+        context.user_data['awaiting'] = 'branch'
+        
+    elif data == "help":
+        help_text = """
+🤖 *How to Use*
+
+*Pincode Lookup:*
+1. Click 'Lookup by Pincode'
+2. Enter 6-digit pincode
+3. Get complete details
+
+*Branch Search:*
+1. Click 'Search by Branch'  
+2. Enter post office name
+3. Find matching branches
+
+*Examples:*
+• Pincode: `110001`, `400001`
+• Branch: `Connaught Place`, `Fort`
+
+📍 *Coverage:* All India Post Offices
+⚡ *Uptime:* 24/7 Monitored
+        """
+        await query.edit_message_text(
+            help_text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Back", callback_data="main_menu")]
+            ])
+        )
+    
+    elif data == "bot_status":
+        uptime = datetime.now() - bot_start_time
+        status_text = f"""
+📊 *Bot Status Report*
+
+• ✅ **Status:** Operational
+• 🕒 **Uptime:** {str(uptime).split('.')[0]}
+• 📈 **Total Requests:** {total_requests}
+• ✅ **Successful Lookups:** {successful_lookups}
+• 🌐 **API:** PostalPincode.in
+• 📍 **Coverage:** All India
+
+*Monitoring:*
+• UptimeRobot ✅
+• BetterStack ✅
+• Health Checks ✅
+
+Last Updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        """
+        await query.edit_message_text(
+            status_text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh", callback_data="bot_status")],
+                [InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]
+            ])
+        )
+        
+    elif data == "main_menu":
+        keyboard = [
+            [InlineKeyboardButton("🔍 Lookup by Pincode", callback_data="lookup_pincode")],
+            [InlineKeyboardButton("🏢 Search by Branch", callback_data="search_branch")],
+            [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
+            [InlineKeyboardButton("📊 Bot Status", callback_data="bot_status")]
+        ]
+        await query.edit_message_text(
+            "🌐 *Postal Pincode Lookup Bot*\n\nChoose an option: 👇",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle user text input"""
+    user_input = update.message.text.strip()
+    user_data = context.user_data
+    
+    if 'awaiting' not in user_data:
+        # Send main menu if no context
+        await start(update, context)
+        return
+    
+    input_type = user_data['awaiting']
+    
+    if input_type == 'pincode':
+        if not user_input.isdigit() or len(user_input) != 6:
+            await update.message.reply_text(
+                "❌ *Invalid Pincode!*\nPlease enter a valid 6-digit pincode.",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Try Again", callback_data="lookup_pincode")],
+                    [InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]
+                ])
+            )
+            return
+            
+        await update.message.reply_text("🔍 *Searching...*", parse_mode='Markdown')
+        
+        post_offices = await get_pincode_info(user_input)
+        
+        if not post_offices:
+            await update.message.reply_text(
+                f"❌ *No results found for* `{user_input}`",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Try Another", callback_data="lookup_pincode")],
+                    [InlineKeyboardButton("🏢 Branch Search", callback_data="search_branch")],
+                    [InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]
+                ])
+            )
+            return
+        
+        # Format results
+        response_text = f"📍 *Pincode: {user_input}*\n\n"
+        response_text += f"*Found {len(post_offices)} post office(s):*\n\n"
+        
+        for office in post_offices[:5]:  # Limit to 5 results
+            response_text += f"🏢 *{office['Name']}*\n"
+            response_text += f"• 📍 District: {office['District']}\n"
+            response_text += f"• 🏛️ State: {office['State']}\n"
+            response_text += f"• 🌍 Country: {office['Country']}\n"
+            response_text += f"• 🏷️ Type: {office['BranchType']}\n\n"
+        
+        if len(post_offices) > 5:
+            response_text += f"*... and {len(post_offices) - 5} more*"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔍 New Pincode", callback_data="lookup_pincode")],
+            [InlineKeyboardButton("🏢 Branch Search", callback_data="search_branch")],
+            [InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]
+        ]
+        
+        await update.message.reply_text(
+            response_text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif input_type == 'branch':
+        if len(user_input) < 3:
+            await update.message.reply_text(
+                "❌ Please enter at least 3 characters",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Try Again", callback_data="search_branch")],
+                    [InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]
+                ])
+            )
+            return
+            
+        await update.message.reply_text("🔍 *Searching branches...*", parse_mode='Markdown')
+        
+        branches = await search_by_branch(user_input)
+        
+        if not branches:
+            await update.message.reply_text(
+                f"❌ *No branches found for* \"{user_input}\"",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Try Another", callback_data="search_branch")],
+                    [InlineKeyboardButton("🔍 Pincode Lookup", callback_data="lookup_pincode")],
+                    [InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]
+                ])
+            )
+            return
+        
+        response_text = f"🏢 *Branch Search: {user_input}*\n\n"
+        response_text += f"*Found {len(branches)} branch(es):*\n\n"
+        
+        for branch in branches[:5]:
+            response_text += f"📍 *{branch['Name']}*\n"
+            response_text += f"• 📮 Pincode: `{branch['Pincode']}`\n"
+            response_text += f"• 🏛️ District: {branch['District']}\n"
+            response_text += f"• 🌍 State: {branch['State']}\n\n"
+        
+        if len(branches) > 5:
+            response_text += f"*... and {len(branches) - 5} more*"
+        
+        keyboard = [
+            [InlineKeyboardButton("🏢 New Search", callback_data="search_branch")],
+            [InlineKeyboardButton("🔍 Pincode Lookup", callback_data="lookup_pincode")],
+            [InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]
+        ]
+        
+        await update.message.reply_text(
+            response_text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    # Clear context
+    user_data.pop('awaiting', None)
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors gracefully"""
+    logger.error(f"Error: {context.error}")
+    
+    if update and update.effective_chat:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ An error occurred. Please try again!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Restart", callback_data="main_menu")]
+            ])
+        )
+
+def run_flask_app():
+    """Run Flask app in separate thread"""
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+
+def main():
+    """Start the bot with webhook for 24/7 reliability"""
+    # Start Flask app in background thread for health checks
+    flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
+    logger.info("Flask health check server started on port 5000")
     
-    logger.info("Flask health monitoring server started")
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
     
-    # Run the bot in the main thread
-    run_bot()
+    # Start bot based on environment
+    if WEBHOOK_URL:
+        # Production with webhook (Render/Railway)
+        logger.info(f"Starting webhook on port {PORT}")
+        logger.info(f"Webhook URL: {WEBHOOK_URL}/{BOT_TOKEN}")
+        logger.info(f"Health checks available at: {WEBHOOK_URL}/health")
+        
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+            secret_token='WEBHOOK_SECRET'
+        )
+    else:
+        # Development with polling
+        logger.info("Starting polling mode")
+        logger.info("Health checks available at: http://localhost:5000/health")
+        application.run_polling()
+
+if __name__ == '__main__':
+    main()
