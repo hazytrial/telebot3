@@ -15,7 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-BOT_TOKEN = "7966712011:AAFVVWlxWaXSOaxuEtxkIY73LKXkvZyVSoQ"
+BOT_TOKEN = "7966712011:AAGv5WhZmW2-c87qwjAyZY6aVtczfuNf9jM"
 PORT = int(os.environ.get('PORT', 10000))
 WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
 
