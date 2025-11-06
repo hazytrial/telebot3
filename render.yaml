@@ -1,17 +1,15 @@
 services:
   - type: web
-    name: pincode-bot
+    name: telegram-pincode-bot
     env: python
+    region: oregon
     plan: free
-    branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
-        description: "Telegram Bot Token from @BotFather"
         sync: false
-      - key: PORT
-        value: 8443
+      - key: PYTHON_VERSION
+        value: 3.11.9
     healthCheckPath: /health
-    healthCheckTimeout: 30
     autoDeploy: true
