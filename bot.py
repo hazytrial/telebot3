@@ -1,11 +1,11 @@
 import logging
 import requests
 import os
-import threading
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime
+import asyncio
 
 # Configure logging
 logging.basicConfig(
@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 BOT_TOKEN = "7966712011:AAFVVWlxWaXSOaxuEtxkIY73LKXkvZyVSoQ"
-PORT = int(os.environ.get('PORT', 8443))
-WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL') or os.environ.get('RAILWAY_STATIC_URL')
+PORT = int(os.environ.get('PORT', 10000))
+WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
 
 # Initialize Flask app for health checks
 app = Flask(__name__)
@@ -26,27 +26,30 @@ app = Flask(__name__)
 bot_start_time = datetime.now()
 total_requests = 0
 successful_lookups = 0
+bot_initialized = False
 
 @app.route('/')
 def home():
     return jsonify({
         "status": "Bot is running",
         "service": "Telegram Postal Pincode Bot",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "bot_initialized": bot_initialized
     })
 
 @app.route('/health')
 def health_check():
-    """Health check endpoint for monitoring"""
-    global total_requests, successful_lookups
+    """Health check endpoint for UptimeRobot and BetterStack"""
+    global total_requests, successful_lookups, bot_initialized
     
-    # Check if bot is responsive
-    bot_status = "healthy"
+    bot_status = "healthy" if bot_initialized else "initializing"
+    
+    # Check API availability
     try:
-        # Simple API test
         test_response = requests.get("https://api.postalpincode.in/pincode/110001", timeout=5)
         api_status = "up" if test_response.status_code == 200 else "down"
-    except:
+    except Exception as e:
+        logger.warning(f"API health check failed: {e}")
         api_status = "down"
     
     uptime = datetime.now() - bot_start_time
@@ -59,38 +62,54 @@ def health_check():
         "total_requests": total_requests,
         "successful_lookups": successful_lookups,
         "api_status": api_status,
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "webhook_configured": bool(WEBHOOK_URL)
     }
     
+    # Return 200 if bot is healthy, 503 if not
     status_code = 200 if bot_status == "healthy" and api_status == "up" else 503
     return jsonify(health_data), status_code
 
 @app.route('/metrics')
 def metrics():
-    """Metrics endpoint for monitoring"""
+    """Prometheus-style metrics endpoint"""
     global total_requests, successful_lookups
     
     uptime = datetime.now() - bot_start_time
+    error_rate = round((1 - successful_lookups / total_requests) * 100, 2) if total_requests > 0 else 0
     
-    metrics_data = {
-        "bot_metrics": {
-            "uptime_seconds": int(uptime.total_seconds()),
-            "total_requests": total_requests,
-            "successful_lookups": successful_lookups,
-            "error_rate": round((1 - successful_lookups / total_requests) * 100, 2) if total_requests > 0 else 0
-        },
-        "timestamp": datetime.now().isoformat()
-    }
+    metrics_text = f"""# HELP bot_uptime_seconds Bot uptime in seconds
+# TYPE bot_uptime_seconds gauge
+bot_uptime_seconds {int(uptime.total_seconds())}
+
+# HELP bot_total_requests Total number of requests
+# TYPE bot_total_requests counter
+bot_total_requests {total_requests}
+
+# HELP bot_successful_lookups Successful lookup requests
+# TYPE bot_successful_lookups counter
+bot_successful_lookups {successful_lookups}
+
+# HELP bot_error_rate Error rate percentage
+# TYPE bot_error_rate gauge
+bot_error_rate {error_rate}
+"""
     
-    return jsonify(metrics_data)
+    return metrics_text, 200, {'Content-Type': 'text/plain; charset=utf-8'}
 
 @app.route('/ready')
 def ready_check():
-    """Readyness check for deployment"""
-    return jsonify({"status": "ready", "bot": "operational"}), 200
+    """Kubernetes-style readiness check"""
+    global bot_initialized
+    if bot_initialized:
+        return jsonify({"status": "ready", "bot": "operational"}), 200
+    else:
+        return jsonify({"status": "not_ready", "bot": "initializing"}), 503
 
-# Initialize Telegram application
-application = Application.builder().token(BOT_TOKEN).build()
+@app.route('/ping')
+def ping():
+    """Simple ping endpoint for uptime monitoring"""
+    return "pong", 200
 
 # API Functions
 async def get_pincode_info(pincode):
@@ -107,7 +126,7 @@ async def get_pincode_info(pincode):
                 return data[0]['PostOffice']
         return None
     except Exception as e:
-        logger.error(f"API Error: {e}")
+        logger.error(f"API Error for pincode {pincode}: {e}")
         return None
 
 async def search_by_branch(branch_name):
@@ -124,7 +143,7 @@ async def search_by_branch(branch_name):
                 return data[0]['PostOffice']
         return None
     except Exception as e:
-        logger.error(f"API Error: {e}")
+        logger.error(f"API Error for branch {branch_name}: {e}")
         return None
 
 # Bot Handlers
@@ -138,15 +157,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     welcome_text = """
-🌐 *Postal Pincode Lookup Bot*
+🌐 *Postal Pincode Lookup Bot By @Castedspel*
 
 *Quick Actions:*
 • 🔍 Lookup by 6-digit Pincode
 • 🏢 Search by Branch/Post Office name
-• 📍 Get complete address details
-• ⚡ Fast API-based results
-• 📊 24/7 Monitoring
-
 *Choose an option below:* 👇
     """
     
@@ -201,8 +216,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Pincode: `110001`, `400001`
 • Branch: `Connaught Place`, `Fort`
 
-📍 *Coverage:* All India Post Offices
-⚡ *Uptime:* 24/7 Monitored
         """
         await query.edit_message_text(
             help_text,
@@ -218,18 +231,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 *Bot Status Report*
 
 • ✅ **Status:** Operational
-• 🕒 **Uptime:** {str(uptime).split('.')[0]}
-• 📈 **Total Requests:** {total_requests}
-• ✅ **Successful Lookups:** {successful_lookups}
-• 🌐 **API:** PostalPincode.in
 • 📍 **Coverage:** All India
-
-*Monitoring:*
-• UptimeRobot ✅
-• BetterStack ✅
-• Health Checks ✅
-
-Last Updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         """
         await query.edit_message_text(
             status_text,
@@ -242,8 +244,8 @@ Last Updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         
     elif data == "main_menu":
         keyboard = [
-            [InlineKeyboardButton("🔍 Lookup by Pincode", callback_data="lookup_pincode")],
-            [InlineKeyboardButton("🏢 Search by Branch", callback_data="search_branch")],
+            [InlineKeyboardButton("🔍 Lookup Pincode", callback_data="lookup_pincode")],
+            [InlineKeyboardButton("🏢 Search Branch", callback_data="search_branch")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
             [InlineKeyboardButton("📊 Bot Status", callback_data="bot_status")]
         ]
@@ -259,7 +261,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     
     if 'awaiting' not in user_data:
-        # Send main menu if no context
         await start(update, context)
         return
     
@@ -293,11 +294,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Format results
         response_text = f"📍 *Pincode: {user_input}*\n\n"
         response_text += f"*Found {len(post_offices)} post office(s):*\n\n"
         
-        for office in post_offices[:5]:  # Limit to 5 results
+        for office in post_offices[:5]:
             response_text += f"🏢 *{office['Name']}*\n"
             response_text += f"• 📍 District: {office['District']}\n"
             response_text += f"• 🏛️ State: {office['State']}\n"
@@ -370,32 +370,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
-    # Clear context
     user_data.pop('awaiting', None)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors gracefully"""
-    logger.error(f"Error: {context.error}")
+    logger.error(f"Error: {context.error}", exc_info=context.error)
     
-    if update and update.effective_chat:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="❌ An error occurred. Please try again!",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Restart", callback_data="main_menu")]
-            ])
-        )
+    try:
+        if update and update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ An error occurred. Please try again!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Restart", callback_data="main_menu")]
+                ])
+            )
+    except Exception as e:
+        logger.error(f"Error in error handler: {e}")
 
-def run_flask_app():
-    """Run Flask app in separate thread"""
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+async def post_init(application: Application):
+    """Post initialization callback"""
+    global bot_initialized
+    
+    if WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
+        await application.bot.set_webhook(
+            url=webhook_url,
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True,
+            secret_token='WEBHOOK_SECRET_TOKEN_12345'
+        )
+        logger.info(f"Webhook set: {webhook_url}")
+    
+    bot_initialized = True
+    logger.info("Bot initialization complete")
 
 def main():
     """Start the bot with webhook for 24/7 reliability"""
-    # Start Flask app in background thread for health checks
-    flask_thread = threading.Thread(target=run_flask_app, daemon=True)
-    flask_thread.start()
-    logger.info("Flask health check server started on port 5000")
+    global bot_initialized
+    
+    logger.info(f"Starting bot on port {PORT}")
+    logger.info(f"Webhook URL: {WEBHOOK_URL}")
+    
+    # Build application
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
@@ -403,25 +426,40 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
     
-    # Start bot based on environment
+    # Start bot
     if WEBHOOK_URL:
-        # Production with webhook (Render/Railway)
-        logger.info(f"Starting webhook on port {PORT}")
-        logger.info(f"Webhook URL: {WEBHOOK_URL}/{BOT_TOKEN}")
-        logger.info(f"Health checks available at: {WEBHOOK_URL}/health")
+        # Production mode with webhook
+        logger.info("Starting in WEBHOOK mode")
+        logger.info(f"Health endpoint: {WEBHOOK_URL}/health")
+        logger.info(f"Metrics endpoint: {WEBHOOK_URL}/metrics")
         
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=BOT_TOKEN,
             webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
-            secret_token='WEBHOOK_SECRET'
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True,
+            secret_token='WEBHOOK_SECRET_TOKEN_12345'
         )
     else:
-        # Development with polling
-        logger.info("Starting polling mode")
-        logger.info("Health checks available at: http://localhost:5000/health")
-        application.run_polling()
+        # Development mode with polling
+        logger.info("Starting in POLLING mode (development)")
+        bot_initialized = True
+        application.run_polling(allowed_updates=["message", "callback_query"])
 
 if __name__ == '__main__':
-    main()
+    # Run Flask for health checks in main thread with bot
+    from werkzeug.serving import run_simple
+    from threading import Thread
+    
+    def run_bot():
+        main()
+    
+    # Start bot in separate thread
+    bot_thread = Thread(target=run_bot, daemon=False)
+    bot_thread.start()
+    
+    # Run Flask in main thread
+    logger.info(f"Starting Flask health server on port {PORT}")
+    run_simple('0.0.0.0', PORT, app, use_reloader=False, use_debugger=False)
