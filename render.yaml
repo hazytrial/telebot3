@@ -1,14 +1,17 @@
 services:
   - type: web
-    name: indian-postal-bot
+    name: pincode-bot
     env: python
-    region: oregon
     plan: free
+    branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      - key: BOT_TOKEN
+        description: "Telegram Bot Token from @BotFather"
         sync: false
-      - key: PYTHON_VERSION
-        value: 3.11.9
+      - key: PORT
+        value: 8443
     healthCheckPath: /health
+    healthCheckTimeout: 30
+    autoDeploy: true
