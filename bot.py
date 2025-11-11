@@ -1,32 +1,44 @@
 import os
-import logging
 import json
 import tempfile
 import asyncio
+import logging
 from urllib.parse import urlparse
 from functools import wraps
-from flask import Flask, request
-
+from flask import Flask
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 import yt_dlp
 
-# ===== Logging Setup =====
+# =======================
+# Logging Configuration
+# =======================
 logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ===== Flask App for Render/UptimeRobot =====
+# =======================
+# Flask (for health check)
+# =======================
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def health_check():
-    """UptimeRobot/BetterStack health monitor"""
+    """Health check endpoint for UptimeRobot or Render"""
     return {"status": "ok", "service": "Video Downloader Bot"}, 200
 
 
-# ===== Async Timeout Decorator =====
+# =======================
+# Async Timeout Decorator
+# =======================
 def async_timeout(seconds):
     def decorator(func):
         @wraps(func)
@@ -39,7 +51,9 @@ def async_timeout(seconds):
     return decorator
 
 
-# ===== Bot Class =====
+# =======================
+# Video Downloader Bot
+# =======================
 class VideoDownloaderBot:
     def __init__(self, token: str, base_url: str):
         self.token = token
@@ -51,7 +65,9 @@ class VideoDownloaderBot:
         self.bot_telegram = "@Hazypy"
         self.load_stats()
 
-    # --- Stats ---
+    # -----------------------
+    # Stats Handling
+    # -----------------------
     def load_stats(self):
         try:
             with open(self.stats_file, "r") as f:
@@ -62,7 +78,6 @@ class VideoDownloaderBot:
                 "users": {},
                 "platforms": {},
                 "failed_downloads": 0,
-                "admin_broadcasts": 0,
             }
             self.save_stats()
 
@@ -83,23 +98,26 @@ class VideoDownloaderBot:
             self.stats["failed_downloads"] += 1
         self.save_stats()
 
-    # --- Command Handlers ---
+    # -----------------------
+    # Telegram Commands
+    # -----------------------
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "🎥 **Welcome to Video Downloader Bot!**\n\n"
-            "Just send me a **video link** and I’ll download it for you!\n\n"
-            "Supported: YouTube, Instagram, TikTok, Twitter, Facebook, Pinterest & more.\n\n"
-            "⚠️ **Use responsibly — respect copyright laws.**"
+            "Just send me a video link and I'll fetch it for you.\n\n"
+            "Supported Platforms:\n"
+            "• YouTube\n• Instagram\n• TikTok\n• Twitter\n• Facebook\n• Pinterest\n\n"
+            "⚠️ Please use responsibly and respect copyright laws."
         )
         await update.message.reply_text(text)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
-            "🤖 **How to Use:**\n\n"
-            "1️⃣ Send a valid video link.\n"
-            "2️⃣ Wait for the bot to fetch it.\n"
-            "3️⃣ Receive your downloaded file!\n\n"
-            "**Supported Platforms:** YouTube, Instagram, TikTok, Twitter, Facebook, Pinterest, and more."
+            "🤖 **How to Use:**\n"
+            "1️⃣ Send me a valid video link.\n"
+            "2️⃣ Wait for the download.\n"
+            "3️⃣ Receive your file!\n\n"
+            "**Supported:** YouTube, Instagram, TikTok, Twitter, Facebook, Pinterest."
         )
         await update.message.reply_text(text)
 
@@ -108,7 +126,9 @@ class VideoDownloaderBot:
             f"👑 **Video Downloader Bot**\n\nBuilt with ❤️ by {self.bot_owner}\nTelegram: {self.bot_telegram}"
         )
 
-    # --- Downloading Logic ---
+    # -----------------------
+    # Downloading Logic
+    # -----------------------
     @async_timeout(180)
     async def download_video(self, url: str, platform: str):
         loop = asyncio.get_event_loop()
@@ -176,8 +196,11 @@ class VideoDownloaderBot:
             if os.path.exists(path):
                 os.remove(path)
 
-    # --- Start Bot ---
+    # -----------------------
+    # Run Bot (Auto Mode)
+    # -----------------------
     async def run(self):
+        IS_RENDER = os.getenv("RENDER_EXTERNAL_URL") is not None
         application = (
             Application.builder()
             .token(self.token)
@@ -185,26 +208,35 @@ class VideoDownloaderBot:
             .build()
         )
 
+        # Add handlers
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("about", self.about_command))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
-        # Webhook URL
-        webhook_url = f"{self.base_url}/{self.token}"
-        await application.bot.set_webhook(webhook_url)
-        logger.info(f"Webhook set: {webhook_url}")
+        if IS_RENDER:
+            webhook_url = f"{self.base_url}/{self.token}"
+            logger.info(f"🌐 Running in webhook mode: {webhook_url}")
+            await application.bot.set_webhook(webhook_url)
+            await application.run_webhook(
+                listen="0.0.0.0",
+                port=int(os.getenv("PORT", "5000")),
+                webhook_url=webhook_url,
+            )
+        else:
+            logger.info("💻 Running locally (polling mode)")
+            await application.run_polling()
 
-        async with application:
-            await application.start()
-            await application.updater.start_webhook(listen="0.0.0.0", port=5000, webhook_url=webhook_url)
-            await application.idle()
 
-
-# ===== Run Server =====
+# =======================
+# Main Entry
+# =======================
 if __name__ == "__main__":
     TOKEN = "8408389849:AAFWJe7ljfbaHmhmauc00BBZQtP7HD2ibSU"
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-app.onrender.com")
+
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN environment variable is missing!")
 
     bot = VideoDownloaderBot(TOKEN, BASE_URL)
     asyncio.run(bot.run())
