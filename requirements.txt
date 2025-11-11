@@ -1,5 +1,5 @@
 python-telegram-bot==21.7
-Flask==3.0.0
-requests==2.31.0
-Werkzeug==3.0.1
-gunicorn==21.2.0
+Flask==3.0.3
+yt-dlp==2024.11.04
+aiohttp==3.9.5
+requests==2.32.3
