@@ -60,8 +60,8 @@ class VideoDownloaderBot:
         self.token = token
         self.base_url = base_url
         self.stats_file = "bot_stats.json"
-        self.download_timeout = 180  # seconds
-        self.admins = [8275649347,8177229129]
+        self.download_timeout = 120  # seconds
+        self.admins = [8275649347]
         self.bot_owner = "Hazy"
         self.bot_telegram = "@Hazypy"
         self.load_stats()
@@ -236,8 +236,6 @@ if __name__ == "__main__":
     TOKEN = "8408389849:AAFWJe7ljfbaHmhmauc00BBZQtP7HD2ibSU"
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-app.onrender.com")
 
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable is missing!")
 
     bot = VideoDownloaderBot(TOKEN, BASE_URL)
     bot.run()  # ✅ synchronous — no asyncio.run()
