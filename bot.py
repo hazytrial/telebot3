@@ -4,7 +4,6 @@ import tempfile
 import logging
 from urllib.parse import urlparse
 from functools import wraps
-from flask import Flask
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -23,18 +22,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
-
-# =======================
-# Flask (for uptime monitoring)
-# =======================
-app = Flask(__name__)
-
-@app.route("/", methods=["GET"])
-def health_check():
-    """Health check endpoint for UptimeRobot or BetterStack."""
-    return {"status": "ok", "service": "Video Downloader Bot"}, 200
-
+logger = logging.getLogger("VideoDownloaderBot")
 
 # =======================
 # Async Timeout Decorator
@@ -58,9 +46,9 @@ def async_timeout(seconds):
 class VideoDownloaderBot:
     def __init__(self, token: str, base_url: str):
         self.token = token
-        self.base_url = base_url
+        self.base_url = base_url.rstrip("/")
         self.stats_file = "bot_stats.json"
-        self.download_timeout = 120  # seconds
+        self.download_timeout = 180  # seconds
         self.admins = [8275649347]
         self.bot_owner = "Hazy"
         self.bot_telegram = "@Hazypy"
@@ -105,9 +93,8 @@ class VideoDownloaderBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "🎥 **Welcome to Video Downloader Bot!**\n\n"
-            "Just send me a **video link**, and I'll download it for you.\n\n"
-            "Supported Platforms:\n"
-            "• YouTube\n• Instagram\n• TikTok\n• Twitter\n• Facebook\n• Pinterest\n\n"
+            "Send me a video link and I’ll download it for you.\n\n"
+            "**Supported:** YouTube, Instagram, TikTok, Twitter, Facebook, Pinterest, and more.\n\n"
             "⚠️ Use responsibly and respect copyright laws."
         )
         await update.message.reply_text(text)
@@ -116,9 +103,9 @@ class VideoDownloaderBot:
         text = (
             "🤖 **How to Use:**\n"
             "1️⃣ Send a valid video link.\n"
-            "2️⃣ Wait while I fetch it.\n"
+            "2️⃣ Wait for the bot to process it.\n"
             "3️⃣ Receive your file!\n\n"
-            "**Supported:** YouTube, Instagram, TikTok, Twitter, Facebook, Pinterest."
+            "Supported platforms include YouTube, Instagram, TikTok, Twitter, Facebook, and Pinterest."
         )
         await update.message.reply_text(text)
 
@@ -140,6 +127,7 @@ class VideoDownloaderBot:
             "format": "best[height<=720]/best",
             "outtmpl": os.path.join(tempfile.gettempdir(), f"{platform}_%(title)s.%(ext)s"),
             "quiet": True,
+            "nocheckcertificate": True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -170,13 +158,13 @@ class VideoDownloaderBot:
             return
 
         platform = self.get_platform(url)
-        msg = await update.message.reply_text(f"🔄 Downloading from {platform.capitalize()}... Please wait.")
+        msg = await update.message.reply_text(f"🔄 Downloading from {platform.capitalize()}... Please wait ⏳")
 
         try:
             path = await self.download_video(url, platform)
             size = os.path.getsize(path) / (1024 * 1024)
             if size > 49:
-                await msg.edit_text("❌ File too large for Telegram (max 50MB).")
+                await msg.edit_text("❌ File too large for Telegram (max 50 MB).")
                 self.update_stats(user_id, platform, success=False)
                 return
 
@@ -190,7 +178,7 @@ class VideoDownloaderBot:
 
             await msg.delete()
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Download error: {e}")
             await msg.edit_text("❌ Download failed. Please try again later.")
             self.update_stats(user_id, platform, success=False)
         finally:
@@ -198,7 +186,7 @@ class VideoDownloaderBot:
                 os.remove(path)
 
     # -----------------------
-    # Run Bot (Auto Mode)
+    # Run Bot (Webhook or Polling)
     # -----------------------
     def run(self):
         IS_RENDER = os.getenv("RENDER_EXTERNAL_URL") is not None
@@ -209,7 +197,7 @@ class VideoDownloaderBot:
             .build()
         )
 
-        # Add handlers
+        # Handlers
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("about", self.about_command))
@@ -222,10 +210,12 @@ class VideoDownloaderBot:
                 listen="0.0.0.0",
                 port=int(os.getenv("PORT", "5000")),
                 webhook_url=webhook_url,
+                webhook_path=f"/{self.token}",
+                health_check="/",        # PTB handles health check
                 drop_pending_updates=True,
             )
         else:
-            logger.info("💻 Running locally (polling mode)")
+            logger.info("💻 Running locally in polling mode")
             application.run_polling(drop_pending_updates=True)
 
 
@@ -233,9 +223,11 @@ class VideoDownloaderBot:
 # Main Entry
 # =======================
 if __name__ == "__main__":
-    TOKEN = "8408389849:AAFWJe7ljfbaHmhmauc00BBZQtP7HD2ibSU"
+    TOKEN = os.getenv("BOT_TOKEN", "8408389849:AAFWJe7ljfbaHmhmauc00BBZQtP7HD2ibSU")
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-app.onrender.com")
 
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN environment variable missing!")
 
     bot = VideoDownloaderBot(TOKEN, BASE_URL)
-    bot.run()  # ✅ synchronous — no asyncio.run()
+    bot.run()
