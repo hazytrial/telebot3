@@ -1,329 +1,210 @@
-import logging
-import requests
 import os
-from flask import Flask, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from datetime import datetime
-from threading import Thread
+import logging
+import json
+import tempfile
+import asyncio
+from urllib.parse import urlparse
+from functools import wraps
+from flask import Flask, request
 
-# Logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import yt_dlp
+
+# ===== Logging Setup =====
 logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
-BOT_TOKEN = os.environ.get('BOT_TOKEN', "7966712011:AAGv5WhZmW2-c87qwjAyZY6aVtczfuNf9jM")
-PORT = int(os.environ.get('PORT', 10000))
-WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
-
-# Flask app
+# ===== Flask App for Render/UptimeRobot =====
 app = Flask(__name__)
-bot_start_time = datetime.now()
-total_requests = 0
-successful_lookups = 0
 
-@app.route('/')
-def home():
-    return jsonify({"status": "running", "service": "Telegram Pincode Bot"})
+@app.route("/", methods=["GET"])
+def health_check():
+    """UptimeRobot/BetterStack health monitor"""
+    return {"status": "ok", "service": "Video Downloader Bot"}, 200
 
-@app.route('/health')
-def health():
-    uptime = datetime.now() - bot_start_time
-    return jsonify({
-        "status": "healthy",
-        "uptime": str(uptime).split('.')[0],
-        "total_requests": total_requests,
-        "successful_lookups": successful_lookups
-    }), 200
 
-@app.route('/ping')
-def ping():
-    return "pong", 200
+# ===== Async Timeout Decorator =====
+def async_timeout(seconds):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await asyncio.wait_for(func(*args, **kwargs), timeout=seconds)
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"Operation timed out after {seconds} seconds")
+        return wrapper
+    return decorator
 
-# API Functions
-async def get_pincode_info(pincode):
-    global total_requests, successful_lookups
-    total_requests += 1
-    try:
-        response = requests.get(f"https://api.postalpincode.in/pincode/{pincode}", timeout=10)
-        data = response.json()
-        if data and data[0]['Status'] == 'Success':
-            successful_lookups += 1
-            return data[0]['PostOffice']
-        return None
-    except:
-        return None
 
-async def search_by_branch(branch_name):
-    global total_requests, successful_lookups
-    total_requests += 1
-    try:
-        response = requests.get(f"https://api.postalpincode.in/postoffice/{branch_name}", timeout=10)
-        data = response.json()
-        if data and data[0]['Status'] == 'Success':
-            successful_lookups += 1
-            return data[0]['PostOffice']
-        return None
-    except:
-        return None
+# ===== Bot Class =====
+class VideoDownloaderBot:
+    def __init__(self, token: str, base_url: str):
+        self.token = token
+        self.base_url = base_url
+        self.stats_file = "bot_stats.json"
+        self.download_timeout = 180
+        self.admins = [8275649347,8177229129]
+        self.bot_owner = "Hazy"
+        self.bot_telegram = "@Hazypy"
+        self.load_stats()
 
-# Bot Handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔍 Search by Pincode", callback_data="lookup_pincode")],
-        [InlineKeyboardButton("🏢 Search by Branch Name", callback_data="search_branch")],
-        [InlineKeyboardButton("ℹ️ Help & Instructions", callback_data="help")]
-    ]
-    
-    welcome_text = """
-*Welcome to Indian Postal Code Lookup Service* 🇮🇳
+    # --- Stats ---
+    def load_stats(self):
+        try:
+            with open(self.stats_file, "r") as f:
+                self.stats = json.load(f)
+        except FileNotFoundError:
+            self.stats = {
+                "total_downloads": 0,
+                "users": {},
+                "platforms": {},
+                "failed_downloads": 0,
+                "admin_broadcasts": 0,
+            }
+            self.save_stats()
 
-This bot provides instant access to postal information across India.
+    def save_stats(self):
+        try:
+            with open(self.stats_file, "w") as f:
+                json.dump(self.stats, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save stats: {e}")
 
-*Available Services:*
-• Search by 6-digit PIN code
-• Search by Post Office branch name
-• Get detailed address information
-• District, State & Branch type details
+    def update_stats(self, user_id: int, platform: str, success=True):
+        if success:
+            self.stats["total_downloads"] += 1
+            self.stats["users"].setdefault(str(user_id), 0)
+            self.stats["users"][str(user_id)] += 1
+            self.stats["platforms"][platform] = self.stats["platforms"].get(platform, 0) + 1
+        else:
+            self.stats["failed_downloads"] += 1
+        self.save_stats()
 
-*Please select a service below to continue.*
-    """
-    
-    await update.message.reply_text(
-        welcome_text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "lookup_pincode":
-        await query.edit_message_text(
-            "*PIN Code Lookup*\n\nPlease enter a 6-digit PIN code.\n\nExample: `110001`",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Back to Menu", callback_data="main_menu")]])
+    # --- Command Handlers ---
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = (
+            "🎥 **Welcome to Video Downloader Bot!**\n\n"
+            "Just send me a **video link** and I’ll download it for you!\n\n"
+            "Supported: YouTube, Instagram, TikTok, Twitter, Facebook, Pinterest & more.\n\n"
+            "⚠️ **Use responsibly — respect copyright laws.**"
         )
-        context.user_data['awaiting'] = 'pincode'
-        
-    elif query.data == "search_branch":
-        await query.edit_message_text(
-            "*Branch Name Search*\n\nPlease enter the Post Office branch name.\n\nExample: `Connaught Place`",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Back to Menu", callback_data="main_menu")]])
+        await update.message.reply_text(text)
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = (
+            "🤖 **How to Use:**\n\n"
+            "1️⃣ Send a valid video link.\n"
+            "2️⃣ Wait for the bot to fetch it.\n"
+            "3️⃣ Receive your downloaded file!\n\n"
+            "**Supported Platforms:** YouTube, Instagram, TikTok, Twitter, Facebook, Pinterest, and more."
         )
-        context.user_data['awaiting'] = 'branch'
-        
-    elif query.data == "help":
-        help_text = """
-*How to Use This Service*
+        await update.message.reply_text(text)
 
-*PIN Code Lookup:*
-1. Select "Search by Pincode"
-2. Enter any valid 6-digit Indian PIN code
-3. Receive complete postal details
-
-*Branch Name Search:*
-1. Select "Search by Branch Name"
-2. Enter the Post Office name
-3. Get matching branches with PIN codes
-
-*Information Provided:*
-• Post Office name and type
-• PIN code
-• District and State
-• Country information
-
-*Examples:*
-PIN Code: `110001`, `400001`, `560001`
-Branch: `Connaught Place`, `Andheri`, `Koramangala`
-
-For any assistance, please contact support.
-        """
-        await query.edit_message_text(
-            help_text,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Back to Menu", callback_data="main_menu")]])
-        )
-    
-    elif query.data == "main_menu":
-        keyboard = [
-            [InlineKeyboardButton("🔍 Search by Pincode", callback_data="lookup_pincode")],
-            [InlineKeyboardButton("🏢 Search by Branch Name", callback_data="search_branch")],
-            [InlineKeyboardButton("ℹ️ Help & Instructions", callback_data="help")]
-        ]
-        await query.edit_message_text(
-            "*Welcome to Indian Postal Code Lookup Service* 🇮🇳\n\nPlease select a service:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
-        context.user_data.pop('awaiting', None)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.strip()
-    
-    if 'awaiting' not in context.user_data:
-        await start(update, context)
-        return
-    
-    input_type = context.user_data['awaiting']
-    
-    if input_type == 'pincode':
-        # Validate pincode
-        if not user_input.isdigit() or len(user_input) != 6:
-            await update.message.reply_text(
-                "*Invalid PIN Code*\n\nPlease enter a valid 6-digit PIN code.",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Try Again", callback_data="lookup_pincode")],
-                    [InlineKeyboardButton("← Main Menu", callback_data="main_menu")]
-                ])
-            )
-            return
-        
-        await update.message.reply_text("*Searching postal database...*", parse_mode='Markdown')
-        
-        post_offices = await get_pincode_info(user_input)
-        
-        if not post_offices:
-            await update.message.reply_text(
-                f"*No Results Found*\n\nNo postal information available for PIN code: `{user_input}`",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Try Another PIN", callback_data="lookup_pincode")],
-                    [InlineKeyboardButton("← Main Menu", callback_data="main_menu")]
-                ])
-            )
-            return
-        
-        # Format results
-        response = f"*PIN Code: {user_input}*\n\n"
-        response += f"*Total Post Offices: {len(post_offices)}*\n\n"
-        
-        for i, office in enumerate(post_offices[:5], 1):
-            response += f"*{i}. {office['Name']}*\n"
-            response += f"   • District: {office['District']}\n"
-            response += f"   • State: {office['State']}\n"
-            response += f"   • Type: {office['BranchType']}\n"
-            response += f"   • Country: {office['Country']}\n\n"
-        
-        if len(post_offices) > 5:
-            response += f"_...and {len(post_offices) - 5} more post offices_\n\n"
-        
-        response += "_Data provided by India Post_"
-        
+    async def about_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            response,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔍 New Search", callback_data="lookup_pincode")],
-                [InlineKeyboardButton("← Main Menu", callback_data="main_menu")]
-            ])
+            f"👑 **Video Downloader Bot**\n\nBuilt with ❤️ by {self.bot_owner}\nTelegram: {self.bot_telegram}"
         )
-        
-    elif input_type == 'branch':
-        # Validate branch name
-        if len(user_input) < 3:
-            await update.message.reply_text(
-                "*Invalid Input*\n\nPlease enter at least 3 characters.",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Try Again", callback_data="search_branch")],
-                    [InlineKeyboardButton("← Main Menu", callback_data="main_menu")]
-                ])
-            )
+
+    # --- Downloading Logic ---
+    @async_timeout(180)
+    async def download_video(self, url: str, platform: str):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._download_sync, url, platform)
+
+    def _download_sync(self, url: str, platform: str):
+        ydl_opts = {
+            "format": "best[height<=720]/best",
+            "outtmpl": os.path.join(tempfile.gettempdir(), f"{platform}_%(title)s.%(ext)s"),
+            "quiet": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return ydl.prepare_filename(info)
+
+    def get_platform(self, url: str):
+        domain = urlparse(url.lower()).netloc
+        if "youtube" in domain or "youtu.be" in domain:
+            return "youtube"
+        elif "instagram" in domain:
+            return "instagram"
+        elif "tiktok" in domain:
+            return "tiktok"
+        elif "twitter" in domain or "x.com" in domain:
+            return "twitter"
+        elif "facebook" in domain:
+            return "facebook"
+        elif "pinterest" in domain:
+            return "pinterest"
+        return "generic"
+
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        url = update.message.text.strip()
+        user_id = update.effective_user.id
+
+        if not url.startswith(("http://", "https://")):
+            await update.message.reply_text("⚠️ Please send a valid link starting with http:// or https://")
             return
-        
-        await update.message.reply_text("*Searching postal database...*", parse_mode='Markdown')
-        
-        branches = await search_by_branch(user_input)
-        
-        if not branches:
-            await update.message.reply_text(
-                f"*No Results Found*\n\nNo branches found matching: \"{user_input}\"",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Try Another Search", callback_data="search_branch")],
-                    [InlineKeyboardButton("← Main Menu", callback_data="main_menu")]
-                ])
-            )
-            return
-        
-        # Format results
-        response = f"*Search Results for: {user_input}*\n\n"
-        response += f"*Total Branches Found: {len(branches)}*\n\n"
-        
-        for i, branch in enumerate(branches[:5], 1):
-            response += f"*{i}. {branch['Name']}*\n"
-            response += f"   • PIN Code: `{branch['Pincode']}`\n"
-            response += f"   • District: {branch['District']}\n"
-            response += f"   • State: {branch['State']}\n\n"
-        
-        if len(branches) > 5:
-            response += f"_...and {len(branches) - 5} more branches_\n\n"
-        
-        response += "_Data provided by India Post_"
-        
-        await update.message.reply_text(
-            response,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏢 New Search", callback_data="search_branch")],
-                [InlineKeyboardButton("← Main Menu", callback_data="main_menu")]
-            ])
+
+        platform = self.get_platform(url)
+        msg = await update.message.reply_text(f"🔄 Downloading from {platform.capitalize()}... Please wait.")
+
+        try:
+            path = await self.download_video(url, platform)
+            size = os.path.getsize(path) / (1024 * 1024)
+            if size > 49:
+                await msg.edit_text("❌ File too large for Telegram (max 50MB).")
+                self.update_stats(user_id, platform, success=False)
+                return
+
+            self.update_stats(user_id, platform, success=True)
+            caption = f"✅ Downloaded successfully from {platform.capitalize()}!"
+            with open(path, "rb") as f:
+                if path.endswith((".mp4", ".webm", ".mov", ".avi")):
+                    await update.message.reply_video(video=f, caption=caption)
+                else:
+                    await update.message.reply_document(document=f, caption=caption)
+
+            await msg.delete()
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            await msg.edit_text("❌ Download failed. Try again later.")
+            self.update_stats(user_id, platform, success=False)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    # --- Start Bot ---
+    async def run(self):
+        application = (
+            Application.builder()
+            .token(self.token)
+            .concurrent_updates(True)
+            .build()
         )
-    
-    context.user_data.pop('awaiting', None)
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Error: {context.error}")
-    try:
-        if update and update.effective_chat:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="*Service Error*\n\nAn error occurred. Please try again.",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Main Menu", callback_data="main_menu")]])
-            )
-    except:
-        pass
+        application.add_handler(CommandHandler("start", self.start))
+        application.add_handler(CommandHandler("help", self.help_command))
+        application.add_handler(CommandHandler("about", self.about_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
-def run_bot():
-    logger.info("Starting Telegram Bot")
-    
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
-    
-    if WEBHOOK_URL:
-        logger.info(f"Webhook mode: {WEBHOOK_URL}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=BOT_TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
-        )
-    else:
-        logger.info("Polling mode")
-        application.run_polling()
+        # Webhook URL
+        webhook_url = f"{self.base_url}/{self.token}"
+        await application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook set: {webhook_url}")
 
-def main():
-    # Start bot thread
-    bot_thread = Thread(target=run_bot, daemon=False)
-    bot_thread.start()
-    
-    # Run Flask
-    from werkzeug.serving import run_simple
-    logger.info(f"Flask server on port {PORT}")
-    run_simple('0.0.0.0', PORT, app, use_reloader=False, use_debugger=False)
+        async with application:
+            await application.start()
+            await application.updater.start_webhook(listen="0.0.0.0", port=5000, webhook_url=webhook_url)
+            await application.idle()
 
-if __name__ == '__main__':
-    main()
+
+# ===== Run Server =====
+if __name__ == "__main__":
+    TOKEN = "8408389849:AAFWJe7ljfbaHmhmauc00BBZQtP7HD2ibSU"
+    BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-app.onrender.com")
+
+    bot = VideoDownloaderBot(TOKEN, BASE_URL)
+    asyncio.run(bot.run())
