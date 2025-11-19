@@ -224,7 +224,7 @@ class VideoDownloaderBot:
 # =======================
 if __name__ == "__main__":
     TOKEN = os.getenv("BOT_TOKEN", "8378901865:AAGInYYz40BWyyOAA-tnS0NoS0GWNtTVbnc")
-    BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-app.onrender.com")
+    BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://telebot3-47ag.onrender.com")
 
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable missing!")
